@@ -16,6 +16,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include <cstdlib>
 
 using namespace mlir;
 using namespace mlir::detail;
@@ -367,6 +368,12 @@ void PassManager::enableIRPrinting(
     bool printModuleScope, bool printAfterOnlyOnChange,
     bool printAfterOnlyOnFailure, raw_ostream &out,
     OpPrintingFlags opPrintingFlags) {
+
+  if(std::getenv("ELIDE")) {
+    opPrintingFlags.elideLargeElementsAttrs(2);
+    opPrintingFlags.elideLargeResourceString(2);
+  }
+
   enableIRPrinting(std::make_unique<BasicIRPrinterConfig>(
       std::move(shouldPrintBeforePass), std::move(shouldPrintAfterPass),
       printModuleScope, printAfterOnlyOnChange, printAfterOnlyOnFailure,
