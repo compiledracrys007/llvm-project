@@ -27,6 +27,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
+#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
 

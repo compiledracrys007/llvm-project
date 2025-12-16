@@ -35,6 +35,8 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -52,6 +54,7 @@
 
 using namespace mlir;
 using namespace mlir::linalg;
+using namespace mlir::bufferization;
 
 /// Return a `memref.dim` or `tensor.dim` for the shape of `v` at `dim`.
 static OpFoldResult getDimValue(OpBuilder &builder, Location loc, Value v,
@@ -1339,6 +1342,204 @@ Speculation::Speculatability GenericOp::getSpeculatability() {
 }
 
 LogicalResult GenericOp::verify() { return success(); }
+
+
+
+//===----------------------------------------------------------------------===//
+// KVCacheUpdateOp
+//===----------------------------------------------------------------------===//
+
+//   void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result, Type resultTy, Value source,
+//                           Value dest, ArrayRef<Range> ranges,
+//                           ArrayRef<NamedAttribute> attrs) {
+//     auto [offsets, sizes, strides] = getOffsetsSizesAndStrides(ranges);
+//     build(b, result, resultTy, source, dest, offsets, sizes, strides, attrs);
+//   }
+//   void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result, Type resultTy,
+//     Value source, Value dest, ArrayRef<OpFoldResult> offsets,
+//     ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides,
+//     ArrayRef<NamedAttribute> attrs) {
+//       SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+//       SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+//       dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+//       dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+//       dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+//       result.addAttributes(attrs);
+//       build(b, result, resultTy, source, dest, dynamicOffsets,
+//             dynamicSizes, dynamicStrides, b.getDenseI64ArrayAttr(staticOffsets),
+//             b.getDenseI64ArrayAttr(staticSizes),
+//             b.getDenseI64ArrayAttr(staticStrides));
+//       result.addAttributes(attrs);
+//   }
+//   void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result, Type resultTy,
+//     Value source, Value dest, ValueRange offsets, ValueRange sizes,
+//     ValueRange strides, ArrayRef<NamedAttribute> attrs) {
+//       SmallVector<OpFoldResult> offsetValues = llvm::to_vector<4>(
+//           llvm::map_range(offsets, [](Value v) -> OpFoldResult { return v; }));
+//       SmallVector<OpFoldResult> sizeValues = llvm::to_vector<4>(
+//           llvm::map_range(sizes, [](Value v) -> OpFoldResult { return v; }));
+//       SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
+//           llvm::map_range(strides, [](Value v) -> OpFoldResult { return v; }));
+//       build(b, result, resultTy, source, dest, offsetValues, sizeValues,
+//             strideValues);
+//   }
+
+// LogicalResult KVCacheUpdateOp::bufferize(RewriterBase &rewriter,
+//                                          const BufferizationOptions &options, BufferizationState &state){
+//   Location loc = getLoc();
+//   Value resTy = getResult();
+//   FailureOr<Value> srcMemref = bufferization::getBuffer(rewriter, getSource(), options, state);
+//   if(failed(srcMemref))
+//     return failure();
+//   FailureOr<Value> dstMemref = bufferization::getBuffer(rewriter, getDest(), options, state);
+//   if(failed(dstMemref))
+//     return failure();
+//   FailureOr<BufferLikeType> resultType = bufferization::getBufferType(resTy, options, state);
+//   if(failed(resultType))
+//     return failure();
+//   auto newOp = rewriter.create<KVCacheUpdateOp>(
+//       loc, *resultType, *srcMemref, *dstMemref, getMixedOffsets(),
+//       getMixedSizes(), getMixedStrides());
+//   replaceOpWithBufferizedValues(rewriter, getOperation(), newOp.getResult());
+//   return success();
+// }
+
+// === Builders ===
+
+void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result,
+                            Type resultTy, Value source, Value dest,
+                            Value used_cache, ArrayRef<Range> ranges,
+                            ArrayRef<NamedAttribute> attrs) {
+  // Structured binding from your helper that splits ranges into offsets, sizes, strides.
+  auto [offsets, sizes, strides] = getOffsetsSizesAndStrides(ranges);
+  build(b, result, resultTy, source, dest, used_cache,
+        offsets, sizes, strides, attrs);
+}
+
+void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result,
+                            Type resultTy,
+                            Value source, Value dest, Value used_cache,
+                            ArrayRef<OpFoldResult> offsets,
+                            ArrayRef<OpFoldResult> sizes,
+                            ArrayRef<OpFoldResult> strides,
+                            ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+
+  dispatchIndexOpFoldResults(offsets, dynamicOffsets, staticOffsets);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+
+  // Add attributes once (keep same behavior as before).
+  result.addAttributes(attrs);
+
+  // Forward to the lowest-level builder which takes dynamic values + static attrs.
+  build(b, result, resultTy, source, dest, used_cache,
+        dynamicOffsets, dynamicSizes, dynamicStrides,
+        b.getDenseI64ArrayAttr(staticOffsets),
+        b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides));
+}
+
+void KVCacheUpdateOp::build(OpBuilder &b, OperationState &result,
+                            Type resultTy,
+                            Value source, Value dest, Value used_cache,
+                            ValueRange offsets, ValueRange sizes,
+                            ValueRange strides,
+                            ArrayRef<NamedAttribute> attrs) {
+  SmallVector<OpFoldResult> offsetValues =
+      llvm::to_vector<4>(llvm::map_range(offsets,
+          [](Value v) -> OpFoldResult { return v; }));
+
+  SmallVector<OpFoldResult> sizeValues =
+      llvm::to_vector<4>(llvm::map_range(sizes,
+          [](Value v) -> OpFoldResult { return v; }));
+
+  SmallVector<OpFoldResult> strideValues =
+      llvm::to_vector<4>(llvm::map_range(strides,
+          [](Value v) -> OpFoldResult { return v; }));
+
+  build(b, result, resultTy, source, dest, used_cache,
+        offsetValues, sizeValues, strideValues, attrs);
+}
+
+// === Bufferize ===
+
+LogicalResult KVCacheUpdateOp::bufferize(RewriterBase &rewriter,
+                                         const BufferizationOptions &options,
+                                         BufferizationState &state) {
+  Location loc = getLoc();
+
+  // Source -> buffer
+  FailureOr<Value> srcMemref =
+      bufferization::getBuffer(rewriter, getSource(), options, state);
+  if (failed(srcMemref))
+    return failure();
+
+  // Dest -> buffer
+  FailureOr<Value> dstMemref =
+      bufferization::getBuffer(rewriter, getDest(), options, state);
+  if (failed(dstMemref))
+    return failure();
+  // Result type (buffer-like)
+  FailureOr<BufferLikeType> resultType =
+      bufferization::getBufferType(getResult(), options, state);
+  if (failed(resultType))
+    return failure();
+
+  // Create the bufferized op. Note: pass the bufferized used_cache value in place.
+  auto newOp = rewriter.create<KVCacheUpdateOp>(
+      loc,
+      *resultType,                 // result buffer type
+      *srcMemref,                  // source buffer/value
+      *dstMemref,                  // dest buffer/value
+      getUsedCache(),               // used_cache buffer/value
+      getMixedOffsets(),           // mixed offsets (OpFoldResult vector)
+      getMixedSizes(),             // mixed sizes
+      getMixedStrides()            // mixed strides
+  );
+
+  // Replace original op with the bufferized op's result.
+  replaceOpWithBufferizedValues(rewriter, getOperation(), newOp.getResult());
+  return success();
+}
+
+
+//===----------------------------------------------------------------------===//
+// KVCacheMaskOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult KVCacheMaskOp::bufferize(RewriterBase &rewriter,
+                                         const BufferizationOptions &options,
+                                         BufferizationState &state) {
+  Location loc = getLoc();
+
+  // Source -> buffer
+  FailureOr<Value> srcMemref =
+      bufferization::getBuffer(rewriter, getSource(), options, state);
+  if (failed(srcMemref))
+    return failure();
+
+  // Result type (buffer-like)
+  FailureOr<BufferLikeType> resultType =
+      bufferization::getBufferType(getResult(), options, state);
+  if (failed(resultType))
+    return failure();
+
+  // Create the bufferized op. Note: pass the bufferized used_cache value in place.
+  auto newOp = rewriter.create<KVCacheMaskOp>(
+      loc,
+      *resultType,                 // result buffer type
+      *srcMemref,
+      getStartingPoint(),
+      getMaskValue(),
+      getDimension()
+  );
+  // Replace original op with the bufferized op's result.
+  replaceOpWithBufferizedValues(rewriter, getOperation(), newOp.getResult());
+  return success();
+}
+
 
 namespace {
 

@@ -307,6 +307,16 @@ def ExpandReallocPass : Pass<"expand-realloc"> {
   ];
 }
 
+def DecomposeSubviewCopyPass : Pass<"decompose-subview-ops"> {
+  let summary = "Decomposes subview ops ";
+  let description = [{
+
+  }];
+  let dependentDialects = [
+      "affine::AffineDialect", "memref::MemRefDialect", "vector::VectorDialect"
+  ];
+}
+
 def FlattenMemrefsPass : Pass<"flatten-memref"> {
   let summary = "Flatten a multiple dimensional memref to 1-dimensional";
   let description = [{

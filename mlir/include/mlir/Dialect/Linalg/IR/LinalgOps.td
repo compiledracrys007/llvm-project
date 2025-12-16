@@ -22,6 +22,7 @@ include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/TilingInterface.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
+include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.td"
 
 // Base class for Linalg dialect ops that do not correspond to library calls.
 class Linalg_Op<string mnemonic, list<Trait> traits = []> :
@@ -90,6 +91,169 @@ def Linalg_IndexOp : Linalg_Op<"index", [Pure]>,
   let hasVerifier = 1;
   let hasFolder = 1;
 }
+
+def KVCacheUpdateOp : Linalg_Op<"kvcacheupdate", [AttrSizedOperandSegments, OffsetSizeAndStrideOpInterface,
+  DeclareOpInterfaceMethods<BufferizableOpInterface>
+]> {
+  let summary = "KV Cache update operator";
+  let description = [{
+    Permutes the dimensions of `input` according to the given `permutation`.
+      `dim(result, i) = dim(input, permutation[i])`
+
+    This op actually moves data, unlike `memref.transpose` which is a metadata
+    operation only that produces a transposed "view".
+
+    Example:
+    ```mlir
+      %update = linalg.kv_cache_update
+          ins(%input:tensor<16x64xf32>)
+          outs(%init:tensor<64x16xf32>)
+    ```
+  }]; 
+
+  let arguments = (ins
+    // Input arg
+    AnyTypeOf<[AnyMemRef, AnyRankedTensor]>:$source,
+    AnyTypeOf<[AnyMemRef, AnyRankedTensor]>:$dest,
+    Index:$used_cache,
+    Variadic<Index>:$offsets, 
+    Variadic<Index>:$strides, 
+    Variadic<Index>:$sizes, 
+    DenseI64ArrayAttr:$static_strides, 
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_offsets
+  );
+  let results = (outs AnyTypeOf<[AnyMemRef, AnyRankedTensor]>:$result);
+
+  let assemblyFormat = [{
+    $source `into` $dest ``
+    $used_cache ``
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `into` type($dest) `->` type($result)
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Type":$resultTy, "Value": $source, "Value": $dest, "Value":$used_cache,
+    "ArrayRef<OpFoldResult>":$offsets, "ArrayRef<OpFoldResult>":$sizes, 
+    "ArrayRef<OpFoldResult>":$strides, CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>, 
+
+    OpBuilder<(ins "Type":$resultTy, "Value":$source, "Value":$dest, "Value":$used_cache,
+    "ValueRange":$offsets, "ValueRange":$sizes, "ValueRange": $strides, 
+    CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    
+    OpBuilder<(ins "Type":$resultTy, "Value":$source, "Value":$dest,"Value":$used_cache,
+      "ArrayRef<Range>":$ranges,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+
+  let extraClassDeclaration= [{
+    Type getSourceType(){
+      return getSource().getType();
+    }
+
+    Type getDestType(){
+      return getDest().getType();
+    }
+    
+    std::array<unsigned, 3> getArrayAttrMaxRanks(){
+      if(auto rankedTensorType = dyn_cast<RankedTensorType>(getDestType())){
+        unsigned rank = rankedTensorType.getRank();
+        return {rank, rank, rank};
+      }
+      if(auto memrefType = dyn_cast<MemRefType>(getDestType())){
+        unsigned rank = memrefType.getRank();
+        return {rank, rank, rank};
+      }
+      return {2, 2, 2};
+    }
+
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 3;}
+    MutableOperandRange getDpsInitsMutable() { return getDestMutable();}
+
+    SmallVector<OpFoldResult> getMixedOffsets(){
+      OpBuilder b(getContext());
+      return ::mlir::getMixedValues(getStaticOffsets(), getOffsets(), b);
+    }
+    SmallVector<OpFoldResult> getMixedSizes(){
+      OpBuilder b(getContext());
+      return ::mlir::getMixedValues(getStaticSizes(), getSizes(), b);
+    }
+    SmallVector<OpFoldResult> getMixedStrides(){
+      OpBuilder b(getContext());
+      return ::mlir::getMixedValues(getStaticStrides(), getStrides(), b);
+    }
+    bool bufferizesToMemoryRead(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return true;
+    }
+    bool bufferizesToMemoryWrite(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return false;
+    }
+    ::mlir::bufferization::AliasingValueList
+    getAliasingValues(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return {};
+    }
+    LogicalResult bufferize(RewriterBase &rewriter,
+                            const bufferization::BufferizationOptions &options,
+                            bufferization::BufferizationState &state);
+  }];
+}
+
+def KVCacheMaskOp : Linalg_Op<"kvcachemask", [
+  DeclareOpInterfaceMethods<BufferizableOpInterface>
+]> {
+  let summary = "KV Cache mask operator";
+  let description = [{
+    Masks a copy of the kv cache with a given value
+
+  }]; 
+
+  let arguments = (ins
+    // Input arg
+    AnyTypeOf<[AnyMemRef, AnyRankedTensor]>:$source,
+    Index:$starting_point,
+    Index:$mask_value,
+    I64Attr:$dimension
+  );
+  let results = (outs AnyTypeOf<[AnyMemRef, AnyRankedTensor]>:$result);
+
+  let assemblyFormat = [{
+  $source `:` type($source)
+  `starting_point` `(` $starting_point `)`
+  `mask_value` `(` $mask_value`)`
+  attr-dict
+  `->` type($result)
+}];
+
+
+
+  let extraClassDeclaration= [{
+    Type getSourceType(){
+      return getSource().getType();
+    }
+    bool bufferizesToMemoryRead(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return true;
+    }
+    bool bufferizesToMemoryWrite(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return true;
+    }
+    ::mlir::bufferization::AliasingValueList
+    getAliasingValues(::mlir::OpOperand&,
+        const ::mlir::bufferization::AnalysisState&) {
+      return {};
+    }
+    LogicalResult bufferize(RewriterBase &rewriter,
+                            const bufferization::BufferizationOptions &options,
+                            bufferization::BufferizationState &state);
+  }];
+}
+
 
 def Linalg_SoftmaxOp : Linalg_Op<"softmax",
     [DestinationStyleOpInterface,

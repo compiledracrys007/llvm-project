@@ -105,6 +105,28 @@ def ConvertElementwiseToLinalgPass : Pass<"convert-elementwise-to-linalg", ""> {
   let dependentDialects = ["linalg::LinalgDialect", "memref::MemRefDialect"];
 }
 
+def DecomposeLinalgSoftmaxPass : Pass<"decompose-linalg-softmax", ""> {
+  let summary = "Decomposes linalg softmax";
+  let description = [{
+    Decomposes linalg softmax ops
+  }];
+  let dependentDialects = ["linalg::LinalgDialect", "memref::MemRefDialect", "tensor::TensorDialect"];
+}
+
+def MarkTensorInsertInplacePass : Pass<"mark-tensor-insert-inplace", ""> {
+  let summary = "Mark tensor insert ops as inplace with attribute";
+  let description = [{
+    Add attributes to tensor insert ops to lower them with inplace memory opeartion
+  }];
+  let dependentDialects = ["linalg::LinalgDialect", "memref::MemRefDialect", "tensor::TensorDialect"];
+}
+
+def ConvertKVCacheUpdateOpToAffineLoopsPass: Pass<"convert-kvcacheupdate-to-affine-loops", "">{
+  let summary = "Pass to convert kv cache update op to affine loops representation";
+  let description = [{Pass to convert kv cache update op to affine loops representation}];
+  let dependentDialects = ["affine::AffineDialect", "linalg::LinalgDialect", "memref::MemRefDialect"];
+}
+
 def ConvertLinalgToAffineLoopsPass : Pass<"convert-linalg-to-affine-loops"> {
   let summary = "Lower the operations from the linalg dialect into affine "
                 "loops";
